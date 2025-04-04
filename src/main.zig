@@ -21,9 +21,8 @@ const Mode = enum {
 };
 
 const Cursor = struct {
-    x: i32,
-    y: i32,
-    count: i32,
+    position: i64,
+    count: i64,
 };
 
 const Command = union(enum) {
@@ -85,10 +84,28 @@ const TextBuffer = struct {
         };
     }
 
-    fn apply_insert(self: *TypeSelf, command: Command.Insert) !void {}
+    fn get_active_node(self: *TypeSelf) !*Node {
+        var index: i64 = 0;
+        var node: ?*Node = self.first;
+        while(node) : ({
+                    index += node.text.len;
+                    node = nd.next;
+                    }) |nd| {
+            if(index + nd.text.len > self.cursor.position){
+                return nd;
+            }
+        }
+        return error.NodeNotFound;
+    }
+
+    fn apply_insert(self: *TypeSelf, command: Command.Insert) !void {
+        _ = self;
+        _ = command;
+    }
 
     fn apply_erase(self: *TypeSelf, command: Command.Erase) !void {
-        unreachable;
+        _ = self;
+        _ = command;
     }
 
     const Node = struct {
@@ -103,3 +120,7 @@ const TextBuffer = struct {
 };
 
 pub fn main() !void {}
+
+test "Text Buffer Search" {
+    const buffer = TextBuffer.NewBlank()
+}
