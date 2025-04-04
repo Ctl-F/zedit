@@ -61,12 +61,13 @@ const TextBuffer = struct {
 
     mode: Mode,
     cursor: Cursor,
-    allocator: *std.mem.Allocator,
+    allocator: std.mem.Allocator,
     first: *Node,
     last: *Node,
 
-    pub fn NewBlank(allocator: *std.mem.Allocator) !TypeSelf {
+    pub fn NewBlank(allocator: std.mem.Allocator) !TypeSelf {
         const initialNode = try allocator.create(Node);
+        initialNode.* = std.mem.zeroes(Node);
 
         return TypeSelf{
             .mode = .Command,
@@ -84,23 +85,100 @@ const TextBuffer = struct {
         };
     }
 
-    fn get_active_node(self: *TypeSelf) !*Node {
-        var index: i64 = 0;
+    fn get_active_node(self: *TypeSelf) CursorPositionInfo {
+        var remaining = self.cursor.position;
         var node: ?*Node = self.first;
-        while(node) : ({
-                    index += node.text.len;
-                    node = nd.next;
-                    }) |nd| {
-            if(index + nd.text.len > self.cursor.position){
-                return nd;
+        while (node) |nd| {
+            if (remaining < nd.text.len) {
+                return CursorPositionInfo{
+                    .node = node,
+                    .offset = @as(usize, @intCast(remaining)),
+                };
+            }
+
+            remaining -= @intCast(nd.text.len);
+            node = nd.next;
+            if (node == null) {
+                break;
             }
         }
-        return error.NodeNotFound;
+
+        return CursorPositionInfo{
+            .node = null,
+            .offset = 0,
+        };
     }
 
     fn apply_insert(self: *TypeSelf, command: Command.Insert) !void {
-        _ = self;
-        _ = command;
+        const cursorInfo = self.get_active_node();
+
+        if (cursorInfo.node) |_| {
+            // TODO:
+        } else {
+            return self.append_to_end(command);
+        }
+    }
+
+    fn append_to_end(self: *TypeSelf, command: Command.Insert) !void {
+        var section_begin: usize = 0;
+
+        while (section_begin < command.data.len) {
+            const section_end: usize = @min(section_begin + Node.NODE_LENGTH, command.data.len);
+            const section: []const u8 = command.data[section_begin..section_end];
+
+            const node = try self.allocator.create(Node);
+            node.* = std.mem.zeroes(Node);
+
+            @memcpy(node.text_buffer[0..section.len], section);
+            node.text = node.text_buffer[0..section.len];
+
+            if (self.last == self.first) {
+                self.first.next = node;
+                node.previous = self.first;
+                self.last = node;
+            } else {
+                if (self.last.previous) |prev| {
+                    prev.next = node;
+                    node.previous = prev;
+                    self.last = node;
+                } else {
+                    unreachable;
+                }
+            }
+
+            section_begin = section_end;
+        }
+
+        self.cursor.position += @intCast(command.data.len);
+    }
+
+    fn insert_text(node: *Node, offset: u64, text: []const u8) void {
+        const total_free = node.total_free_space();
+        const new_length = node.text.len + text.len;
+
+        std.debug.assert(new_length <= node.text_buffer.len);
+        std.debug.assert(total_free >= text.len);
+        std.debug.assert(offset + text.len <= node.text_buffer.len);
+        std.debug.assert(offset <= node.text.len);
+
+        const tmp_buffer: [node.NODE_LENGTH]u8 = undefined;
+
+        const pre_text: []u8 = node.text_buffer[0..offset];
+        const post_text: []u8 = node.text_buffer[offset..node.text.len];
+
+        const pre_begin = 0;
+        const pre_end = pre_begin + offset;
+        const text_begin = pre_end;
+        const text_end = text_begin + text.len;
+        const post_begin = text_end;
+        const post_end = post_begin + post_text.len;
+
+        @memcpy(tmp_buffer[pre_begin..pre_end], pre_text);
+        @memcpy(tmp_buffer[text_begin..text_end], text);
+        @memcpy(tmp_buffer[post_begin..post_end], post_text);
+
+        @memcpy(node.text_buffer[0..new_length], tmp_buffer[0..new_length]);
+        node.text = node.text_buffer[0..new_length];
     }
 
     fn apply_erase(self: *TypeSelf, command: Command.Erase) !void {
@@ -116,11 +194,114 @@ const TextBuffer = struct {
         text: []u8,
         previous: ?*TypeNode,
         next: ?*TypeNode,
+
+        pub inline fn total_free_space(self: *TypeNode) usize {
+            return self.text_buffer.len - self.text.len;
+        }
+    };
+
+    const CursorPositionInfo = struct {
+        node: ?*Node,
+        offset: usize,
     };
 };
 
 pub fn main() !void {}
 
-test "Text Buffer Search" {
-    const buffer = TextBuffer.NewBlank()
+test "get_active_node returns expected CursorPositionInfo" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    //std.debug.print("Allocating text buffer\n", .{});
+    var buffer = try TextBuffer.NewBlank(allocator);
+
+    //std.debug.print("Allocating nodes\n", .{});
+    const node1 = buffer.first;
+    const node2 = try allocator.create(TextBuffer.Node);
+    const node3 = try allocator.create(TextBuffer.Node);
+
+    node2.* = std.mem.zeroes(TextBuffer.Node);
+    node3.* = std.mem.zeroes(TextBuffer.Node);
+
+    const text = "abcdefghijkl";
+    //std.debug.print("Copying data to nodes\n", .{});
+    @memcpy(node1.text_buffer[0..3], text[0..3]);
+    @memcpy(node2.text_buffer[0..4], text[3..7]);
+    @memcpy(node3.text_buffer[0..5], text[7..12]);
+
+    node1.text = node1.text_buffer[0..3];
+    node2.text = node2.text_buffer[0..4];
+    node3.text = node3.text_buffer[0..5];
+
+    node1.next = node2;
+    node2.previous = node1;
+
+    node2.next = node3;
+    node3.previous = node2;
+
+    buffer.last = node3;
+
+    //std.debug.print("Test 0 get_active_node()\n", .{});
+    // case 1: Cursor at offset 0
+    buffer.cursor.position = 0;
+    const info0 = buffer.get_active_node();
+    try std.testing.expect(info0.node == node1);
+    try std.testing.expectEqual(@as(usize, 0), info0.offset);
+
+    //std.debug.print("Test 1 get_active_node()\n", .{});
+    // case 2: cursor at offset 3 (start of node 2)
+    buffer.cursor.position = 3;
+    const info1 = buffer.get_active_node();
+    try std.testing.expect(info1.node == node2);
+    try std.testing.expectEqual(@as(usize, 0), info1.offset);
+
+    //std.debug.print("Test 2 get_active_node()\n", .{});
+    // case 3: cursor at offset 6 (mid node2)
+    buffer.cursor.position = 6;
+    const info2 = buffer.get_active_node();
+    try std.testing.expect(info2.node == node2);
+    try std.testing.expectEqual(@as(usize, 3), info2.offset);
+
+    //std.debug.print("Test 3 get_active_node()\n", .{});
+    // case 4: cursor at offset 12 (past end of final node)
+    buffer.cursor.position = 12;
+    const info3 = buffer.get_active_node();
+    try std.testing.expect(info3.node == null);
+    try std.testing.expectEqual(@as(usize, 0), info3.offset);
+
+    //std.debug.print("End get_active_node() tests\n", .{});
+}
+
+test "apply_command with Insert to end" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    //std.debug.print("Allocating new text buffer\n", .{});
+    var buffer = try TextBuffer.NewBlank(allocator);
+
+    const full_string: []const u8 = "012345678901234567890123456789 012345678901234567890123456789 ab";
+
+    //std.debug.print("Copying data to first node in text buffer.\n", .{});
+    @memcpy(&buffer.first.text_buffer, full_string);
+    buffer.first.text = &buffer.first.text_buffer;
+
+    //std.debug.print("Creating insert command\n", .{});
+    const test_text = "Hello World";
+    const insert_command = Command{
+        .insert = Command.Insert{
+            .data = test_text[0..],
+        },
+    };
+
+    //std.debug.print("Applying command\n", .{});
+    buffer.cursor.position = 64;
+    try buffer.apply_command(insert_command);
+
+    try std.testing.expect(buffer.first != buffer.last);
+    try std.testing.expectEqualStrings(buffer.first.text, full_string);
+    try std.testing.expectEqualStrings(buffer.last.text, test_text);
+
+    //std.debug.print("End apply_command() tests\n", .{});
 }
