@@ -2,6 +2,25 @@ const std = @import("std");
 const ncur = @cImport(@cInclude("curses.h"));
 const loc = @cImport(@cInclude("locale.h"));
 
+
+
+// TODO: Finish Insert
+// TODO: Delete
+// TODO: Cursor Movement
+// TODO: Selection
+// TODO: Undo/Redo Stack
+// TODO: Copy, Cut, Paste
+// TODO: Display
+// TODO: Binary Search for node lookup
+// TODO: Saving, Loading
+// TODO: Searching
+// TODO: Sort+Defragment on Save (double buffered approach if possible)
+// TODO: Custom Node Allocator
+// TODO: Syntax Highlighting
+// TODO: Function+Public Const lookup
+// TODO: Integrated Terminal
+// TODO: Configuration for projects and keybinding for quick script
+
 fn init_curses() void {
     _ = loc.setlocale(loc.LC_ALL, "");
     _ = ncur.initscr();
@@ -111,12 +130,112 @@ const TextBuffer = struct {
 
     fn apply_insert(self: *TypeSelf, command: Command.Insert) !void {
         const cursorInfo = self.get_active_node();
+        
+        defer self.cursor.position += @intCast(command.data.len);
 
-        if (cursorInfo.node) |_| {
-            // TODO:
+        if (cursorInfo.node) |nod| {
+            // repeat until all the text is inserted:
+            // 1: Insert as much text as possible into the current node
+            // 2: Insert a new node (if needed)
+
+            var selNode: *Node = nod;
+            var curOff = cursorInfo.offset;
+
+            if(selNode.total_free_space() == 0){
+                // insert a new node already
+                selNode = try self.insert_right(selNode);
+                curOff = 0;
+            }
+
+            var view: []const u8 = command.data;
+            while(view.len > 0){
+                // if the selected node has enough free space
+                // then we can insert it fine
+                if(selNode.total_free_space() >= view.len){
+                    insert_text(selNode, curOff, view);
+                    break;
+                }
+
+
+                // at this point we already know that the current
+                // node doesn't have enough space to insert the whole
+                // text so we're going to have to split the node
+                const nextNode = try self.split_node(selNode, curOff);
+                
+                // now we add what does fit
+                const slice = view[0..selNode.total_free_space()];
+                insert_text(selNode, curOff, slice);
+                
+                view = view[slice.len..];
+                selNode = nextNode;
+            }
         } else {
             return self.append_to_end(command);
         }
+    }
+
+    pub fn length(self: TypeSelf) usize {
+        var node: ?*Node = self.first;
+        var count: usize = 0;
+        while(node) |nd| {
+            count += nd.text.len;
+            node = nd.next;
+        }
+        return count;
+    }
+
+    
+    pub fn get_text(self: TypeSelf, buffer: []u8) !void {
+        const len = self.length();
+        
+        if(buffer.len < len){
+            return error.InsufficientBuffer;
+        }
+
+        var node: ?*Node = self.first;
+        
+        var start: usize = 0;
+        var end: usize = 0;
+        while(node) |nd| {
+            end = start + nd.text.len;
+            @memcpy(buffer[start..end], nd.text);
+            start = end;
+            node = nd.next;
+        }
+    }
+
+    /// Splits the node at a given offset returning the newly created node
+    /// the original node will stay the same, except it'll have some of its
+    /// data moved over to the two node.
+    /// take care not to leave empty nodes because they'll break cursor logic
+    fn split_node(self: *TypeSelf, node: *Node, offset: usize) !*Node {
+        std.debug.assert(offset < node.text.len);
+        
+        const right_text: []const u8 = node.text[offset..];
+        const newNode = try self.insert_right(node);
+    
+        @memcpy(newNode.text_buffer[0..right_text.len], right_text);
+        newNode.text = newNode.text_buffer[0..right_text.len];
+
+        node.text = node.text[0..offset];
+        return newNode;
+    }
+
+    fn insert_right(self: *TypeSelf, node: *Node) !*Node {
+        const newNode = try self.allocator.create(Node);
+        newNode.* = std.mem.zeroes(Node);
+
+        if(node == self.first and self.first == self.last){
+            self.last = newNode;
+        }
+        if(node.next) |nxt| {
+            newNode.next = nxt;
+            nxt.previous = newNode;
+        }
+        node.next = newNode;
+        newNode.previous = node;
+
+        return newNode;
     }
 
     fn append_to_end(self: *TypeSelf, command: Command.Insert) !void {
@@ -161,7 +280,7 @@ const TextBuffer = struct {
         std.debug.assert(offset + text.len <= node.text_buffer.len);
         std.debug.assert(offset <= node.text.len);
 
-        const tmp_buffer: [node.NODE_LENGTH]u8 = undefined;
+        var tmp_buffer: [Node.NODE_LENGTH]u8 = undefined;
 
         const pre_text: []u8 = node.text_buffer[0..offset];
         const post_text: []u8 = node.text_buffer[offset..node.text.len];
@@ -271,6 +390,39 @@ test "get_active_node returns expected CursorPositionInfo" {
     try std.testing.expectEqual(@as(usize, 0), info3.offset);
 
     //std.debug.print("End get_active_node() tests\n", .{});
+}
+
+test "insert_text simulating keystrokes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var buffer = try TextBuffer.NewBlank(allocator);
+
+    const str: []const u8 = "Hello";
+    
+    const commands = [_] Command {
+        .{ .insert = .{ .data = str[0..1], }, },
+        .{ .insert = .{ .data = str[1..2], }, },
+        .{ .insert = .{ .data = str[2..], }, },
+    };
+
+    for(commands) |cmd| {
+        try buffer.apply_command(cmd);
+    }
+
+    std.debug.print("Attempting to grab length and text\n", .{});
+
+    const len = buffer.length();
+    var buf: [64]u8 = undefined;
+    try buffer.get_text(buf[0..len]);
+    
+    std.debug.print("Results: len {d}, exp {d}\n", .{len, str.len});
+
+    try std.testing.expect(len == str.len);
+    try std.testing.expectEqualStrings(str, buf[0..len]);
+
+    std.debug.print("Keystroke Simulation done: {s}\n", .{buf[0..len]});
 }
 
 test "apply_command with Insert to end" {
